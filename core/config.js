@@ -6,7 +6,7 @@ function toInt(value, fallback) {
 }
 
 module.exports = {
-  port: toInt(process.env.PORT, 3000),
+  port: toInt(process.env.PORT, 3010),
   modulesDir: process.env.MODULES_DIR || 'modules',
   appsDir: process.env.APPS_DIR || 'config/apps',
   defaultAppId: process.env.DEFAULT_APP_ID || 'default',

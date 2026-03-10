@@ -54,10 +54,10 @@ npm run db:migrate:public-ids
 npm run start
 ```
 
-- API: `http://localhost:3000/api`
-- Dashboard: `http://localhost:3000/dashboard`
-- User App Runtime: `http://localhost:3000/app`
-  - Salon vertical app: `http://localhost:3000/app?app=salon`
+- API: `http://localhost:3010/api`
+- Dashboard: `http://localhost:3010/dashboard`
+- User App Runtime: `http://localhost:3010/app`
+  - Salon vertical app: `http://localhost:3010/app?app=salon`
 
 App runtime configuration is loaded from `config/apps/*.json` (default: `default.json`).
 
