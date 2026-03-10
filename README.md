@@ -61,3 +61,7 @@ App runtime configuration is loaded from `config/apps/*.json` (default: `default
 - `GET /api/events`
 - `GET /api/analytics`
 - `POST /api/modules/salon-module/appointments`
+
+## Developer Docs
+
+- Interface runtime guide: `docs/interface-runtime-guide.md`
