@@ -18,5 +18,9 @@
     "pg": "^8.13.3",
     "sqlite": "^5.1.1",
     "sqlite3": "^5.1.7"
+  },
+  "overrides": {
+    "tar": "^7.5.10",
+    "@tootallnate/once": "^3.0.1"
   }
 }
