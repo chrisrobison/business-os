@@ -1,6 +1,7 @@
 const config = require('../core/config');
 const { createDataSource } = require('../core/db');
 const { createControlStore } = require('../core/tenancy/controlStore');
+const { createAuthStore } = require('../core/auth/store');
 
 (async () => {
   const controlStore = await createControlStore(config.controlDb);
@@ -8,6 +9,7 @@ const { createControlStore } = require('../core/tenancy/controlStore');
 
   const tenantDb = await createDataSource(config.db);
   await tenantDb.initSchema();
+  await createAuthStore(tenantDb).ensureSchema('default');
 
   await controlStore.ensureBootstrapTenant({
     host: config.tenancy.bootstrapHost,

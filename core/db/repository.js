@@ -447,6 +447,8 @@ function createRepository(connector) {
 
   return {
     client: connector.client,
+    query: connector.query,
+    transaction: connector.transaction,
     initSchema: connector.initSchema,
     applyMigration: connector.applyMigration,
     close: connector.close,

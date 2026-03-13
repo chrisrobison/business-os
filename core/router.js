@@ -1,12 +1,15 @@
 const express = require('express');
 const entities = require('./entities');
 
-function createEntityRouter(db, eventBus) {
+function createEntityRouter(db, eventBus, options = {}) {
   const router = express.Router();
   const entitySet = new Set(entities);
+  const requireEntityMutationRole = typeof options.requireEntityMutationRole === 'function'
+    ? options.requireEntityMutationRole
+    : ((_req, _res, next) => next());
 
   for (const entity of entities) {
-    router.post(`/${entity}`, async (req, res, next) => {
+    router.post(`/${entity}`, requireEntityMutationRole, async (req, res, next) => {
       try {
         const created = await db.create(entity, req.body || {});
         await eventBus.publish(`${entity.slice(0, -1)}.created`, {
@@ -47,7 +50,7 @@ function createEntityRouter(db, eventBus) {
       }
     });
 
-    router.put(`/${entity}/:identifier`, async (req, res, next) => {
+    router.put(`/${entity}/:identifier`, requireEntityMutationRole, async (req, res, next) => {
       try {
         const updated = await db.update(entity, req.params.identifier, req.body || {});
         if (!updated) {
@@ -66,7 +69,7 @@ function createEntityRouter(db, eventBus) {
       }
     });
 
-    router.delete(`/${entity}/:identifier`, async (req, res, next) => {
+    router.delete(`/${entity}/:identifier`, requireEntityMutationRole, async (req, res, next) => {
       try {
         const existing = await db.getByIdentifier(entity, req.params.identifier);
         if (!existing) {
@@ -177,8 +180,8 @@ function createEntityRouter(db, eventBus) {
     }
   }
 
-  router.post('/links', createClampLink);
-  router.post('/clamps/link', createClampLink);
+  router.post('/links', requireEntityMutationRole, createClampLink);
+  router.post('/clamps/link', requireEntityMutationRole, createClampLink);
 
   router.get('/links', async (req, res, next) => {
     try {

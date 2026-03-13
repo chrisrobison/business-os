@@ -25,6 +25,20 @@ The app uses a connector factory. Set `DB_CLIENT` to switch backend:
 
 Both connectors expose the same interface used by the kernel and modules.
 
+## Authentication + Authorization
+
+- All `/api/*` endpoints require `Authorization: Bearer <jwt>` except:
+  - `/health`
+  - `POST /api/auth/login`
+- Role model: `owner`, `admin`, `staff`, `viewer`
+- Admin tenancy endpoints (`/api/admin/tenancy/*`) require `owner` or `admin`.
+- Entity mutation endpoints (`POST/PUT/DELETE` under `/api/*` entity routes) require `owner`, `admin`, or `staff`.
+
+Auth env vars:
+
+- `AUTH_JWT_SECRET` (required, 32+ chars)
+- `AUTH_TOKEN_TTL_SECONDS` (default `28800`, 8 hours)
+
 ## Multi-Tenant (One DB Per Tenant)
 
 - A separate control-plane DB stores tenancy metadata:
@@ -63,14 +77,20 @@ npm install
 npm run db:init
 ```
 
-4. (Upgrade only) If your database already has existing data and you are upgrading to dual IDs,
+4. Create first owner login identity (required before using authenticated APIs):
+
+```bash
+npm run auth:create-owner -- --email owner@example.com --password 'change-this-password' --name 'Owner User'
+```
+
+5. (Upgrade only) If your database already has existing data and you are upgrading to dual IDs,
 run the additive migration/backfill:
 
 ```bash
 npm run db:migrate:public-ids
 ```
 
-5. Start server:
+6. Start server:
 
 ```bash
 npm run start
@@ -86,6 +106,8 @@ App runtime configuration is loaded from `config/apps/*.json` (default: `default
 
 ## Example APIs
 
+- `POST /api/auth/login` with `{ "email": "...", "password": "..." }`
+- `GET /api/auth/me`
 - `POST /api/customers`
 - `GET /api/invoices?q=acme`
 - `POST /api/payments`

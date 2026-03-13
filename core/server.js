@@ -9,6 +9,8 @@ const { loadAppDefinition, listAppIds } = require('./appDefinitions');
 const { createControlStore } = require('./tenancy/controlStore');
 const { createTenantManager } = require('./tenancy/tenantManager');
 const { runWithRequestContext, getRequestContext } = require('./requestContext');
+const { createAuthMiddleware } = require('./auth/middleware');
+const { buildAuthConfig, validateAuthConfig } = require('./auth/config');
 
 const serverHookRegistry = {
   'server.auditView': async ({ req, appId, navItemId, context, options }) => ({
@@ -16,7 +18,7 @@ const serverHookRegistry = {
     hook: 'server.auditView',
     appId,
     navItemId,
-    actor: req.headers['x-business-user'] || 'anonymous',
+    actor: req.auth ? req.auth.userId : (req.headers['x-business-user'] || 'anonymous'),
     area: options?.area || navItemId || null,
     event: context?.event || null,
     at: new Date().toISOString()
@@ -26,7 +28,7 @@ const serverHookRegistry = {
     hook: 'server.auditSave',
     appId,
     navItemId,
-    actor: req.headers['x-business-user'] || 'anonymous',
+    actor: req.auth ? req.auth.userId : (req.headers['x-business-user'] || 'anonymous'),
     area: options?.area || navItemId || null,
     event: context?.event || null,
     at: new Date().toISOString()
@@ -37,6 +39,8 @@ async function buildServer() {
   const app = express();
   app.use(cors());
   app.use(express.json({ limit: '2mb' }));
+  const authConfig = buildAuthConfig(process.env);
+  validateAuthConfig(authConfig);
 
   const controlStore = await createControlStore(config.controlDb);
   await controlStore.initSchema();
@@ -88,7 +92,6 @@ async function buildServer() {
   app.use(async (req, res, next) => {
     const requestPath = req.path || '';
     const isControlPlane = requestPath === '/health'
-      || requestPath.startsWith('/api/admin/tenancy')
       || requestPath.startsWith('/admin');
 
     if (isControlPlane) {
@@ -126,7 +129,17 @@ async function buildServer() {
     res.redirect('/app');
   });
 
-  app.use('/api', createEntityRouter(db, eventBus));
+  const auth = createAuthMiddleware({ db, authConfig });
+
+  app.post('/api/auth/login', auth.loginHandler);
+  app.use('/api', auth.authenticateRequest({ allowAnonymousPaths: ['/auth/login'] }));
+  app.get('/api/auth/me', (req, res) => {
+    res.json({ user: req.auth || null });
+  });
+
+  app.use('/api', createEntityRouter(db, eventBus, {
+    requireEntityMutationRole: auth.requireEntityMutationRole
+  }));
 
   const { modules, scheduler } = await loadPlugins({
     app,
@@ -210,6 +223,8 @@ async function buildServer() {
       return next(error);
     }
   });
+
+  app.use('/api/admin/tenancy', auth.requireRoles(['owner', 'admin']));
 
   app.get('/api/admin/tenancy/summary', async (req, res, next) => {
     try {

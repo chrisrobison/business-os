@@ -15,6 +15,10 @@ module.exports = {
     bootstrapHost: process.env.TENANCY_BOOTSTRAP_HOST || 'localhost',
     bootstrapDomain: process.env.TENANCY_BOOTSTRAP_DOMAIN || 'localhost'
   },
+  auth: {
+    jwtSecret: process.env.AUTH_JWT_SECRET || '',
+    tokenTtlSeconds: toInt(process.env.AUTH_TOKEN_TTL_SECONDS, 60 * 60 * 8)
+  },
   db: {
     client: (process.env.DB_CLIENT || 'mysql').toLowerCase(),
     host: process.env.DB_HOST || '127.0.0.1',
