@@ -61,6 +61,31 @@ function avatarUrlFor(client) {
   return `https://api.dicebear.com/9.x/thumbs/svg?seed=${seed}`;
 }
 
+function viewCopy(view) {
+  if (view === 'dashboard') {
+    return {
+      title: 'Dashboard',
+      subtitle: "Welcome back. Here's what's happening today."
+    };
+  }
+  if (view === 'calendar') {
+    return {
+      title: 'Calendar',
+      subtitle: 'Manage your appointments and schedule.'
+    };
+  }
+  if (view === 'clients') {
+    return {
+      title: 'Clients',
+      subtitle: 'Manage your client database.'
+    };
+  }
+  return {
+    title: 'Salon Manager',
+    subtitle: 'Operations workspace powered by Business OS.'
+  };
+}
+
 class BosSalonWorkspace extends HTMLElement {
   constructor() {
     super();
@@ -81,6 +106,8 @@ class BosSalonWorkspace extends HTMLElement {
     };
 
     this.$root = null;
+    this.$title = null;
+    this.$subtitle = null;
   }
 
   connectedCallback() {
@@ -121,14 +148,24 @@ class BosSalonWorkspace extends HTMLElement {
     this.innerHTML = `
       <section class="salon-workspace">
         <header class="salon-header">
-          <h2 class="salon-title">Salon Operations</h2>
-          <p class="salon-subtle" data-role="subtitle">Vertical workflow plugin powered by Business OS kernel.</p>
+          <p class="salon-badge">Salon Manager</p>
+          <h2 class="salon-title" data-role="title">Salon Manager</h2>
+          <p class="salon-subtle" data-role="subtitle">Operations workspace powered by Business OS.</p>
         </header>
         <div data-role="content" class="salon-content"></div>
       </section>
     `;
 
     this.$root = this.querySelector('[data-role="content"]');
+    this.$title = this.querySelector('[data-role="title"]');
+    this.$subtitle = this.querySelector('[data-role="subtitle"]');
+    this.updateHeader();
+  }
+
+  updateHeader() {
+    const copy = viewCopy(this.state.view);
+    if (this.$title) this.$title.textContent = copy.title;
+    if (this.$subtitle) this.$subtitle.textContent = copy.subtitle;
   }
 
   showError(error) {
@@ -137,6 +174,7 @@ class BosSalonWorkspace extends HTMLElement {
 
   async loadView() {
     this.state.loading = true;
+    this.updateHeader();
     this.$root.innerHTML = '<div class="salon-empty">Loading salon workspace...</div>';
 
     if (this.state.view === 'dashboard') {
@@ -236,7 +274,7 @@ class BosSalonWorkspace extends HTMLElement {
 
     this.$root.innerHTML = `
       ${this.renderMetricCards(data.metrics || {})}
-      <section class="salon-grid-3">
+      <section class="salon-grid-2 salon-dashboard-grid">
         <article class="salon-card">
           <h3>Today's Schedule</h3>
           <p class="salon-subtle">${formatDate(`${data.date}T00:00:00Z`)}</p>
@@ -246,7 +284,7 @@ class BosSalonWorkspace extends HTMLElement {
           <h3>Upcoming Appointments</h3>
           <ul class="salon-list">${upcomingRows || '<li class="salon-empty-li">No upcoming appointments</li>'}</ul>
         </article>
-        <article class="salon-card">
+        <article class="salon-card salon-wide">
           <h3>Recent Clients</h3>
           <ul class="salon-client-list">${recentClientRows || '<li class="salon-empty-li">No clients yet</li>'}</ul>
         </article>
@@ -356,6 +394,11 @@ class BosSalonWorkspace extends HTMLElement {
       .join('');
 
     this.$root.innerHTML = `
+      <section class="salon-page-header">
+        <h3>Calendar</h3>
+        <p class="salon-subtle">Manage your appointments and schedule.</p>
+      </section>
+
       <section class="salon-grid-2">
         <article class="salon-card">
           <header class="salon-card-header">
@@ -685,9 +728,14 @@ class BosSalonWorkspace extends HTMLElement {
     const tableActive = this.state.clientView === 'table' ? 'active' : '';
 
     this.$root.innerHTML = `
+      <section class="salon-page-header">
+        <h3>Clients</h3>
+        <p class="salon-subtle">Manage your client database.</p>
+      </section>
+
       <section class="salon-card">
         <header class="salon-card-header">
-          <h3>Clients</h3>
+          <h3>Client Directory</h3>
           <button type="button" data-action="add-client">Add Client</button>
         </header>
 
