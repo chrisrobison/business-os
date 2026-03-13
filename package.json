@@ -7,6 +7,8 @@
   "scripts": {
     "start": "node core/server.js",
     "dev": "node --watch core/server.js",
+    "test": "node --test",
+    "test:migrations": "node scripts/migration-smoke.js",
     "db:init": "node scripts/init-db.js",
     "db:seed": "node scripts/seed-sample-data.js",
     "db:migrate:public-ids": "node scripts/migrate-public-ids.js",
@@ -15,7 +17,9 @@
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
+    "express-rate-limit": "^7.5.0",
     "express": "^4.21.2",
+    "helmet": "^8.1.0",
     "mysql2": "^3.14.0",
     "pg": "^8.13.3",
     "sqlite": "^5.1.1",

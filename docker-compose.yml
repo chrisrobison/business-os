@@ -1,0 +1,54 @@
+version: '3.9'
+
+services:
+  app:
+    build: .
+    depends_on:
+      - postgres
+    env_file:
+      - config/env/development.env
+    environment:
+      DB_CLIENT: postgres
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: business_os
+      DB_PASSWORD: business_os
+      DB_NAME: business_os_tenant
+      CONTROL_DB_CLIENT: postgres
+      CONTROL_DB_HOST: postgres
+      CONTROL_DB_PORT: 5432
+      CONTROL_DB_USER: business_os
+      CONTROL_DB_PASSWORD: business_os
+      CONTROL_DB_NAME: business_os_control
+      AUTH_JWT_SECRET: replace-me-with-at-least-32-chars
+      TENANCY_BOOTSTRAP_HOST: localhost
+      TENANCY_BOOTSTRAP_DOMAIN: localhost
+      TENANCY_STRICT_HOST_MATCH: "true"
+    ports:
+      - "3010:3010"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: business_os
+      POSTGRES_PASSWORD: business_os
+      POSTGRES_DB: business_os_tenant
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  reverse-proxy:
+    image: nginx:1.27-alpine
+    profiles:
+      - proxy
+    depends_on:
+      - app
+    ports:
+      - "8080:80"
+    volumes:
+      - ./config/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  pgdata:

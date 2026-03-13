@@ -20,8 +20,11 @@ function deriveDomainFromHost(host) {
   return labels.slice(-2).join('.');
 }
 
-function extractRequestHost(req) {
-  const forwarded = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
+function extractRequestHost(req, options = {}) {
+  const trustForwardedHost = options && options.trustForwardedHost === true;
+  const forwarded = trustForwardedHost
+    ? String(req.headers['x-forwarded-host'] || '').split(',')[0].trim()
+    : '';
   const rawHost = forwarded || String(req.headers.host || '');
   return normalizeHost(rawHost);
 }

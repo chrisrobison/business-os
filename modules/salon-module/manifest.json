@@ -6,5 +6,24 @@
     "appointment-scheduling",
     "calendar-view",
     "customer-booking"
-  ]
+  ],
+  "permissions": {
+    "entities": [
+      "appointments",
+      "customers",
+      "users",
+      "payments"
+    ],
+    "routes": true,
+    "jobs": true,
+    "events": {
+      "publish": [
+        "appointment.booked"
+      ],
+      "subscribe": [
+        "appointment.booked",
+        "payment.received"
+      ]
+    }
+  }
 }

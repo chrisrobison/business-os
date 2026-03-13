@@ -315,6 +315,63 @@ function createRepository(connector) {
     return [exact, ...withoutExact];
   }
 
+  async function listByFilters(entity, options = {}) {
+    const columns = await getColumns(entity);
+    const { filters = [], limit = 100, offset = 0, orderBy = null, orderDirection = 'DESC' } = options;
+    const allowedColumns = new Set(columns.map((column) => column.name));
+    const where = [];
+    const params = [];
+
+    for (const filter of filters) {
+      if (!filter || !filter.column) continue;
+      const column = String(filter.column).trim();
+      if (!allowedColumns.has(column)) {
+        throw new Error(`Unknown filter column '${column}' for entity '${entity}'`);
+      }
+
+      const op = String(filter.op || 'eq').toLowerCase();
+      if (op === 'eq') {
+        where.push(`${qid(column)} = ?`);
+        params.push(filter.value);
+        continue;
+      }
+      if (op === 'gte') {
+        where.push(`${qid(column)} >= ?`);
+        params.push(filter.value);
+        continue;
+      }
+      if (op === 'lte') {
+        where.push(`${qid(column)} <= ?`);
+        params.push(filter.value);
+        continue;
+      }
+      if (op === 'like') {
+        where.push(`${qid(column)} LIKE ?`);
+        params.push(filter.value);
+        continue;
+      }
+      if (op === 'in') {
+        const items = Array.isArray(filter.value) ? filter.value.filter((item) => item != null) : [];
+        if (items.length === 0) continue;
+        where.push(`${qid(column)} IN (${items.map(() => '?').join(', ')})`);
+        params.push(...items);
+        continue;
+      }
+      throw new Error(`Unsupported filter operator '${op}'`);
+    }
+
+    const direction = String(orderDirection || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+    const sortColumn = orderBy && allowedColumns.has(orderBy) ? orderBy : (
+      columns.some((c) => c.name === 'modified')
+        ? 'modified'
+        : (columns.some((c) => c.name === 'created') ? 'created' : (columns[0] && columns[0].name) || 'id')
+    );
+
+    const sql = `SELECT * FROM ${qid(entity)}${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY ${qid(sortColumn)} ${direction} LIMIT ? OFFSET ?`;
+    const rows = await connector.query(sql, [...params, Math.min(limit, 2000), offset]);
+    return rows.map(toModel);
+  }
+
   async function updateById(entity, id, payload) {
     const columns = await getColumns(entity);
     const current = await getById(entity, id);
@@ -458,6 +515,7 @@ function createRepository(connector) {
     getByIdentifier,
     resolveId,
     list,
+    listByFilters,
     count,
     update,
     remove,

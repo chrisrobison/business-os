@@ -3,6 +3,7 @@ const { verifyJwt } = require('./jwt');
 const { createAuthStore } = require('./store');
 const { verifyPassword } = require('./passwords');
 const { canMutateEntities, normalizeRole } = require('./roles');
+const { assertAllowedKeys } = require('../validation');
 
 function extractBearerToken(headerValue) {
   const value = String(headerValue || '').trim();
@@ -22,6 +23,7 @@ function createAuthMiddleware({ db, authConfig }) {
 
   async function loginHandler(req, res, next) {
     try {
+      assertAllowedKeys(req.body || {}, new Set(['email', 'password']), 'login payload');
       const email = String((req.body && req.body.email) || '').trim();
       const password = String((req.body && req.body.password) || '');
       if (!email || !password) {

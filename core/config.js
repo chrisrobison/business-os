@@ -5,6 +5,13 @@ function toInt(value, fallback) {
   return Number.isNaN(parsed) ? fallback : parsed;
 }
 
+function parseCsv(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 module.exports = {
   port: toInt(process.env.PORT, 3010),
   modulesDir: process.env.MODULES_DIR || 'modules',
@@ -13,11 +20,20 @@ module.exports = {
   tenancy: {
     strictHostMatch: String(process.env.TENANCY_STRICT_HOST_MATCH || 'true').toLowerCase() !== 'false',
     bootstrapHost: process.env.TENANCY_BOOTSTRAP_HOST || 'localhost',
-    bootstrapDomain: process.env.TENANCY_BOOTSTRAP_DOMAIN || 'localhost'
+    bootstrapDomain: process.env.TENANCY_BOOTSTRAP_DOMAIN || 'localhost',
+    trustForwardedHost: String(process.env.TENANCY_TRUST_FORWARDED_HOST || 'false').toLowerCase() === 'true'
   },
   auth: {
     jwtSecret: process.env.AUTH_JWT_SECRET || '',
     tokenTtlSeconds: toInt(process.env.AUTH_TOKEN_TTL_SECONDS, 60 * 60 * 8)
+  },
+  security: {
+    trustProxy: process.env.TRUST_PROXY || 'false',
+    corsAllowlist: parseCsv(process.env.CORS_ALLOWLIST),
+    rateLimitWindowMs: toInt(process.env.RATE_LIMIT_WINDOW_MS, 60 * 1000),
+    rateLimitMax: toInt(process.env.RATE_LIMIT_MAX, 300),
+    apiBodyLimit: process.env.API_BODY_LIMIT || '1mb',
+    authBodyLimit: process.env.AUTH_BODY_LIMIT || '32kb'
   },
   db: {
     client: (process.env.DB_CLIENT || 'mysql').toLowerCase(),

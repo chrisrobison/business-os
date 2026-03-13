@@ -1,5 +1,11 @@
 const express = require('express');
 const entities = require('./entities');
+const {
+  parsePositiveInt,
+  validateEntityPayload,
+  validateIdentifier,
+  badRequest
+} = require('./validation');
 
 function createEntityRouter(db, eventBus, options = {}) {
   const router = express.Router();
@@ -11,6 +17,7 @@ function createEntityRouter(db, eventBus, options = {}) {
   for (const entity of entities) {
     router.post(`/${entity}`, requireEntityMutationRole, async (req, res, next) => {
       try {
+        validateEntityPayload(entity, req.body || {}, { partial: false });
         const created = await db.create(entity, req.body || {});
         await eventBus.publish(`${entity.slice(0, -1)}.created`, {
           entity,
@@ -26,11 +33,13 @@ function createEntityRouter(db, eventBus, options = {}) {
 
     router.get(`/${entity}`, async (req, res, next) => {
       try {
-        const { q, limit, offset } = req.query;
+        const { q } = req.query;
+        const limit = parsePositiveInt(req.query.limit, 25, { min: 1, max: 200 });
+        const offset = parsePositiveInt(req.query.offset, 0, { min: 0, max: 5000 });
         const rows = await db.list(entity, {
           q,
-          limit: limit ? Number.parseInt(limit, 10) : undefined,
-          offset: offset ? Number.parseInt(offset, 10) : undefined
+          limit,
+          offset
         });
         res.json(rows);
       } catch (error) {
@@ -40,7 +49,8 @@ function createEntityRouter(db, eventBus, options = {}) {
 
     router.get(`/${entity}/:identifier`, async (req, res, next) => {
       try {
-        const row = await db.getByIdentifier(entity, req.params.identifier);
+        const identifier = validateIdentifier(req.params.identifier);
+        const row = await db.getByIdentifier(entity, identifier);
         if (!row) {
           return res.status(404).json({ error: `${entity} record not found` });
         }
@@ -52,7 +62,9 @@ function createEntityRouter(db, eventBus, options = {}) {
 
     router.put(`/${entity}/:identifier`, requireEntityMutationRole, async (req, res, next) => {
       try {
-        const updated = await db.update(entity, req.params.identifier, req.body || {});
+        const identifier = validateIdentifier(req.params.identifier);
+        validateEntityPayload(entity, req.body || {}, { partial: true });
+        const updated = await db.update(entity, identifier, req.body || {});
         if (!updated) {
           return res.status(404).json({ error: `${entity} record not found` });
         }
@@ -71,7 +83,8 @@ function createEntityRouter(db, eventBus, options = {}) {
 
     router.delete(`/${entity}/:identifier`, requireEntityMutationRole, async (req, res, next) => {
       try {
-        const existing = await db.getByIdentifier(entity, req.params.identifier);
+        const identifier = validateIdentifier(req.params.identifier);
+        const existing = await db.getByIdentifier(entity, identifier);
         if (!existing) {
           return res.status(404).json({ error: `${entity} record not found` });
         }
@@ -94,7 +107,8 @@ function createEntityRouter(db, eventBus, options = {}) {
 
     router.get(`/${entity}/resolve/:identifier`, async (req, res, next) => {
       try {
-        const row = await db.getByIdentifier(entity, req.params.identifier);
+        const identifier = validateIdentifier(req.params.identifier);
+        const row = await db.getByIdentifier(entity, identifier);
         if (!row) {
           return res.status(404).json({ error: `${entity} record not found` });
         }
@@ -107,7 +121,7 @@ function createEntityRouter(db, eventBus, options = {}) {
 
   router.get('/events', async (req, res, next) => {
     try {
-      const limit = req.query.limit ? Number.parseInt(req.query.limit, 10) : 100;
+      const limit = parsePositiveInt(req.query.limit, 100, { min: 1, max: 500 });
       const items = await db.listEvents(limit);
       res.json(items);
     } catch (error) {
@@ -196,18 +210,17 @@ function createEntityRouter(db, eventBus, options = {}) {
         resolvedRemoteId = await db.resolveId(remote, remote_id);
       }
 
-      const rows = await db.list('clamps', {
-        limit: limit ? Number.parseInt(limit, 10) : 500,
-        offset: 0
-      });
+      const filters = [];
+      if (local) filters.push({ column: 'local', op: 'eq', value: local });
+      if (local_id) filters.push({ column: 'local_id', op: 'eq', value: resolvedLocalId || local_id });
+      if (remote) filters.push({ column: 'remote', op: 'eq', value: remote });
+      if (remote_id) filters.push({ column: 'remote_id', op: 'eq', value: resolvedRemoteId || remote_id });
+      if (context) filters.push({ column: 'context', op: 'eq', value: context });
 
-      const filtered = rows.filter((row) => {
-        if (local && row.local !== local) return false;
-        if (local_id && row.local_id !== (resolvedLocalId || local_id)) return false;
-        if (remote && row.remote !== remote) return false;
-        if (remote_id && row.remote_id !== (resolvedRemoteId || remote_id)) return false;
-        if (context && row.context !== context) return false;
-        return true;
+      const filtered = await db.listByFilters('clamps', {
+        filters,
+        limit: parsePositiveInt(limit, 500, { min: 1, max: 1000 }),
+        offset: 0
       });
 
       return res.json(filtered);
@@ -223,15 +236,31 @@ function createEntityRouter(db, eventBus, options = {}) {
         return res.status(404).json({ error: `Unknown entity '${entity}'` });
       }
 
-      const resolvedId = await db.resolveId(entity, id);
-      const internalId = resolvedId || id;
-      const rows = await db.list('clamps', { limit: 1000, offset: 0 });
-      const links = rows.filter((row) =>
-        (row.local === entity && row.local_id === internalId) ||
-        (row.remote === entity && row.remote_id === internalId)
-      );
+      const normalizedId = validateIdentifier(id, 'id');
+      const resolvedId = await db.resolveId(entity, normalizedId);
+      const internalId = resolvedId || normalizedId;
+      if (!internalId) {
+        throw badRequest('Unable to resolve target entity id');
+      }
 
-      return res.json(links);
+      const links = await db.listByFilters('clamps', {
+        filters: [
+          { column: 'local', op: 'eq', value: entity },
+          { column: 'local_id', op: 'eq', value: internalId }
+        ],
+        limit: 1000,
+        offset: 0
+      });
+      const reverseLinks = await db.listByFilters('clamps', {
+        filters: [
+          { column: 'remote', op: 'eq', value: entity },
+          { column: 'remote_id', op: 'eq', value: internalId }
+        ],
+        limit: 1000,
+        offset: 0
+      });
+
+      return res.json([...links, ...reverseLinks]);
     } catch (error) {
       return next(error);
     }

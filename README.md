@@ -29,6 +29,7 @@ Both connectors expose the same interface used by the kernel and modules.
 
 - All `/api/*` endpoints require `Authorization: Bearer <jwt>` except:
   - `/health`
+  - `/ready`
   - `POST /api/auth/login`
 - Role model: `owner`, `admin`, `staff`, `viewer`
 - Admin tenancy endpoints (`/api/admin/tenancy/*`) require `owner` or `admin`.
@@ -38,6 +39,16 @@ Auth env vars:
 
 - `AUTH_JWT_SECRET` (required, 32+ chars)
 - `AUTH_TOKEN_TTL_SECONDS` (default `28800`, 8 hours)
+
+Security env vars:
+
+- `TRUST_PROXY` (`false` by default)
+- `TENANCY_TRUST_FORWARDED_HOST` (`false` by default)
+- `CORS_ALLOWLIST` (comma-separated origins; empty means allow all origins)
+- `RATE_LIMIT_WINDOW_MS` (default `60000`)
+- `RATE_LIMIT_MAX` (default `300`)
+- `API_BODY_LIMIT` (default `1mb`)
+- `AUTH_BODY_LIMIT` (default `32kb`)
 
 ## Multi-Tenant (One DB Per Tenant)
 
@@ -97,6 +108,7 @@ npm run start
 ```
 
 - API: `http://localhost:3010/api`
+- Readiness: `http://localhost:3010/ready`
 - Dashboard: `http://localhost:3010/dashboard`
 - Tenancy Admin: `http://localhost:3010/admin`
 - User App Runtime: `http://localhost:3010/app`
@@ -117,6 +129,7 @@ App runtime configuration is loaded from `config/apps/*.json` (default: `default
 - `GET /api/modules/salon-module/dashboard`
 - `GET /api/modules/salon-module/calendar?month=2026-03&date=2026-03-10`
 - `GET /api/modules/salon-module/clients?q=emma`
+- `GET /api/system/metrics`
 
 Tenancy admin APIs:
 
@@ -139,3 +152,23 @@ Tenancy admin APIs:
 ## Developer Docs
 
 - Interface runtime guide: `docs/interface-runtime-guide.md`
+- Backup and restore playbook: `docs/backup-restore-playbook.md`
+
+## Testing
+
+```bash
+npm test
+npm run test:migrations
+```
+
+## Docker
+
+```bash
+docker compose up --build
+```
+
+Optional reverse proxy profile:
+
+```bash
+docker compose --profile proxy up --build
+```

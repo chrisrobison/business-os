@@ -4,6 +4,12 @@ function parseLimit(value, fallback = 50, max = 500) {
   return Math.min(parsed, max);
 }
 
+function parseOffset(value, fallback = 0, max = 5000) {
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isNaN(parsed) || parsed < 0) return fallback;
+  return Math.min(parsed, max);
+}
+
 function dateKey(value) {
   if (!value) return null;
   const parsed = new Date(value);
@@ -153,6 +159,32 @@ function summarizeClient(customer, stats) {
 }
 
 module.exports = async function registerSalonRoutes(router, { db, eventBus }) {
+  async function listAppointmentsByFilters(filters, { limit = 500, offset = 0 } = {}) {
+    if (typeof db.listByFilters === 'function') {
+      return db.listByFilters('appointments', {
+        filters,
+        limit,
+        offset,
+        orderBy: 'start_at',
+        orderDirection: 'ASC'
+      });
+    }
+    return db.list('appointments', { limit, offset });
+  }
+
+  async function listPaymentsByFilters(filters, { limit = 1000, offset = 0 } = {}) {
+    if (typeof db.listByFilters === 'function') {
+      return db.listByFilters('payments', {
+        filters,
+        limit,
+        offset,
+        orderBy: 'paid_at',
+        orderDirection: 'DESC'
+      });
+    }
+    return db.list('payments', { limit, offset });
+  }
+
   async function fetchReferenceData() {
     const [customers, staffUsers] = await Promise.all([
       db.list('customers', { limit: 500, offset: 0 }),
@@ -195,16 +227,21 @@ module.exports = async function registerSalonRoutes(router, { db, eventBus }) {
   router.get('/appointments', async (req, res, next) => {
     try {
       const limit = parseLimit(req.query.limit, 100, 500);
-      const offset = req.query.offset ? Number.parseInt(req.query.offset, 10) : 0;
-      const rows = await db.list('appointments', {
-        q: req.query.q,
-        limit,
-        offset
-      });
-
-      const { customerById, staffById } = await fetchReferenceData();
+      const offset = parseOffset(req.query.offset, 0, 5000);
       const fromDate = req.query.from ? String(req.query.from) : null;
       const toDate = req.query.to ? String(req.query.to) : null;
+      const rows = req.query.q
+        ? await db.list('appointments', {
+          q: req.query.q,
+          limit,
+          offset
+        })
+        : await listAppointmentsByFilters([
+          ...(fromDate ? [{ column: 'start_at', op: 'gte', value: `${fromDate}T00:00:00.000Z` }] : []),
+          ...(toDate ? [{ column: 'start_at', op: 'lte', value: `${toDate}T23:59:59.999Z` }] : [])
+        ], { limit, offset });
+
+      const { customerById, staffById } = await fetchReferenceData();
 
       const hydrated = rows
         .map((item) => hydrateAppointment(item, { customerById, staffById }))
@@ -267,7 +304,9 @@ module.exports = async function registerSalonRoutes(router, { db, eventBus }) {
     try {
       const month = req.query.month ? String(req.query.month).slice(0, 7) : null;
       const selectedDate = req.query.date ? String(req.query.date).slice(0, 10) : null;
-      const rows = await db.list('appointments', { limit: 500, offset: 0 });
+      const rows = month
+        ? await listAppointmentsByFilters([{ column: 'start_at', op: 'like', value: `${month}%` }], { limit: 1000, offset: 0 })
+        : await listAppointmentsByFilters([], { limit: 1000, offset: 0 });
       const { customerById, staffById } = await fetchReferenceData();
 
       const events = rows
@@ -316,7 +355,7 @@ module.exports = async function registerSalonRoutes(router, { db, eventBus }) {
       const q = String(req.query.q || '').trim().toLowerCase();
       const [customers, appointments] = await Promise.all([
         db.list('customers', { limit: 500, offset: 0 }),
-        db.list('appointments', { limit: 1000, offset: 0 })
+        listAppointmentsByFilters([], { limit: 1000, offset: 0 })
       ]);
 
       const visitsByCustomer = buildVisitStats(appointments);
@@ -360,11 +399,11 @@ module.exports = async function registerSalonRoutes(router, { db, eventBus }) {
       }
 
       const [allAppointments, staffUsers] = await Promise.all([
-        db.list('appointments', { limit: 2000, offset: 0 }),
+        listAppointmentsByFilters([{ column: 'customer_id', op: 'eq', value: customer.id }], { limit: 1000, offset: 0 }),
         db.list('users', { limit: 500, offset: 0 })
       ]);
 
-      const clientAppointments = allAppointments.filter((item) => item.customer_id === customer.id);
+      const clientAppointments = allAppointments;
       const visitStats = buildVisitStats(clientAppointments).get(customer.id);
       const staffById = new Map(staffUsers.map((row) => [row.id, row]));
       const customerById = new Map([[customer.id, customer]]);
@@ -390,10 +429,15 @@ module.exports = async function registerSalonRoutes(router, { db, eventBus }) {
       const weekEnd = endOfWeekUtc(targetDate).toISOString().slice(0, 10);
 
       const [appointments, customers, users, payments] = await Promise.all([
-        db.list('appointments', { limit: 1000, offset: 0 }),
+        listAppointmentsByFilters([
+          { column: 'start_at', op: 'gte', value: `${weekStart}T00:00:00.000Z` },
+          { column: 'start_at', op: 'lte', value: `${weekEnd}T23:59:59.999Z` }
+        ], { limit: 2000, offset: 0 }),
         db.list('customers', { limit: 500, offset: 0 }),
         db.list('users', { limit: 500, offset: 0 }),
-        db.list('payments', { limit: 1000, offset: 0 })
+        listPaymentsByFilters([
+          { column: 'status', op: 'eq', value: 'received' }
+        ], { limit: 2000, offset: 0 })
       ]);
 
       const customerById = new Map(customers.map((row) => [row.id, row]));

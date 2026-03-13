@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
+const entities = require('./entities');
 
 function createJobScheduler() {
   const jobs = [];
@@ -34,6 +35,107 @@ function createJobScheduler() {
 
 function resolveIfExists(filePath) {
   return fs.existsSync(filePath) ? filePath : null;
+}
+
+function ensureStringArray(value, label) {
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} must be an array`);
+  }
+  return value.map((item) => String(item || '').trim()).filter(Boolean);
+}
+
+function normalizeManifestPermissions(manifest) {
+  const raw = manifest && manifest.permissions ? manifest.permissions : {};
+  const knownEntities = new Set(entities);
+  const entityList = ensureStringArray(raw.entities || [], 'manifest.permissions.entities');
+  for (const entity of entityList) {
+    if (!knownEntities.has(entity)) {
+      throw new Error(`Unknown entity permission '${entity}'`);
+    }
+  }
+
+  const events = raw.events || {};
+  const publish = ensureStringArray(events.publish || [], 'manifest.permissions.events.publish');
+  const subscribe = ensureStringArray(events.subscribe || [], 'manifest.permissions.events.subscribe');
+
+  return {
+    entities: new Set(entityList),
+    events: {
+      publish: new Set(publish),
+      subscribe: new Set(subscribe)
+    },
+    routes: raw.routes !== false,
+    jobs: raw.jobs !== false
+  };
+}
+
+function createModuleDbProxy(db, permissions, moduleName) {
+  const guardedMethods = new Set([
+    'create',
+    'getById',
+    'getByPublicId',
+    'getByIdentifier',
+    'resolveId',
+    'list',
+    'listByFilters',
+    'count',
+    'update',
+    'remove',
+    'describe',
+    'refreshSchema'
+  ]);
+
+  return new Proxy(db, {
+    get(target, prop) {
+      const value = target[prop];
+      if (typeof value !== 'function' || !guardedMethods.has(String(prop))) {
+        return value;
+      }
+      return (...args) => {
+        const entity = String(args[0] || '').trim();
+        if (!permissions.entities.has(entity)) {
+          throw new Error(`[${moduleName}] entity '${entity}' not declared in manifest permissions`);
+        }
+        return value.apply(target, args);
+      };
+    }
+  });
+}
+
+function createModuleEventBusProxy(eventBus, permissions, moduleName) {
+  return {
+    subscribe(eventName, handler) {
+      const normalized = String(eventName || '').trim();
+      if (!permissions.events.subscribe.has(normalized) && !permissions.events.subscribe.has('*')) {
+        throw new Error(`[${moduleName}] event subscribe '${normalized}' not declared in manifest permissions`);
+      }
+      return eventBus.subscribe(normalized, handler);
+    },
+    publish(eventName, payload = {}) {
+      const normalized = String(eventName || '').trim();
+      if (!permissions.events.publish.has(normalized) && !permissions.events.publish.has('*')) {
+        throw new Error(`[${moduleName}] event publish '${normalized}' not declared in manifest permissions`);
+      }
+      return eventBus.publish(normalized, payload);
+    }
+  };
+}
+
+function createModuleSchedulerProxy(scheduler, permissions, moduleName) {
+  return {
+    addJob(name, handler, intervalMs) {
+      if (!permissions.jobs) {
+        throw new Error(`[${moduleName}] jobs capability not enabled in manifest permissions`);
+      }
+      return scheduler.addJob(name, handler, intervalMs);
+    },
+    listJobs() {
+      return scheduler.listJobs();
+    },
+    stopAll() {
+      return scheduler.stopAll();
+    }
+  };
 }
 
 async function loadModuleMigrations(db, moduleDir, moduleName) {
@@ -93,58 +195,79 @@ async function loadPlugins({ app, db, eventBus, modulesDir }) {
       continue;
     }
 
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    const moduleName = manifest.name || path.basename(moduleDir);
-    const moduleSlug = moduleName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    const panelDefs = loadPanelDefinitions(moduleDir);
-    const migrations = await loadModuleMigrations(db, moduleDir, moduleName);
+    let manifest;
+    try {
+      manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      const moduleName = manifest.name || path.basename(moduleDir);
+      const moduleSlug = moduleName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+      const permissions = normalizeManifestPermissions(manifest);
+      const panelDefs = loadPanelDefinitions(moduleDir);
+      const migrations = await loadModuleMigrations(db, moduleDir, moduleName);
 
-    const moduleContext = {
-      app,
-      db,
-      eventBus,
-      scheduler,
-      module: manifest,
-      moduleDir,
-      logger: {
-        info: (...args) => console.log(`[${moduleName}]`, ...args),
-        warn: (...args) => console.warn(`[${moduleName}]`, ...args),
-        error: (...args) => console.error(`[${moduleName}]`, ...args)
-      }
-    };
+      const moduleContext = {
+        app,
+        db: createModuleDbProxy(db, permissions, moduleName),
+        eventBus: createModuleEventBusProxy(eventBus, permissions, moduleName),
+        scheduler: createModuleSchedulerProxy(scheduler, permissions, moduleName),
+        module: manifest,
+        moduleDir,
+        logger: {
+          info: (...args) => console.log(`[${moduleName}]`, ...args),
+          warn: (...args) => console.warn(`[${moduleName}]`, ...args),
+          error: (...args) => console.error(`[${moduleName}]`, ...args)
+        }
+      };
 
-    const routesPath = resolveIfExists(path.join(moduleDir, 'routes.js'));
-    if (routesPath) {
-      const router = express.Router();
-      const registerRoutes = require(routesPath);
-      if (typeof registerRoutes === 'function') {
-        await registerRoutes(router, moduleContext);
+      const routesPath = resolveIfExists(path.join(moduleDir, 'routes.js'));
+      if (routesPath) {
+        if (!permissions.routes) {
+          throw new Error('routes.js found but manifest.permissions.routes is disabled');
+        }
+        const router = express.Router();
+        const registerRoutes = require(routesPath);
+        if (typeof registerRoutes === 'function') {
+          await registerRoutes(router, moduleContext);
+        }
+        app.use(`/api/modules/${moduleSlug}`, router);
       }
-      app.use(`/api/modules/${moduleSlug}`, router);
+
+      const eventsPath = resolveIfExists(path.join(moduleDir, 'events.js'));
+      if (eventsPath) {
+        const registerEvents = require(eventsPath);
+        if (typeof registerEvents === 'function') {
+          await registerEvents(moduleContext);
+        }
+      }
+
+      const jobsPath = resolveIfExists(path.join(moduleDir, 'jobs.js'));
+      if (jobsPath) {
+        if (!permissions.jobs) {
+          throw new Error('jobs.js found but manifest.permissions.jobs is disabled');
+        }
+        const registerJobs = require(jobsPath);
+        if (typeof registerJobs === 'function') {
+          await registerJobs(moduleContext);
+        }
+      }
+
+      loadedModules.push({
+        ...manifest,
+        slug: moduleSlug,
+        status: 'loaded',
+        migrationsApplied: migrations,
+        panels: panelDefs
+      });
+    } catch (error) {
+      const moduleName = (manifest && manifest.name) || path.basename(moduleDir);
+      console.error(`[pluginLoader] Failed to load module '${moduleName}': ${error.message}`);
+      loadedModules.push({
+        name: moduleName,
+        version: manifest && manifest.version ? manifest.version : 'unknown',
+        slug: moduleName.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+        status: 'failed',
+        error: error.message
+      });
     }
-
-    const eventsPath = resolveIfExists(path.join(moduleDir, 'events.js'));
-    if (eventsPath) {
-      const registerEvents = require(eventsPath);
-      if (typeof registerEvents === 'function') {
-        await registerEvents(moduleContext);
-      }
-    }
-
-    const jobsPath = resolveIfExists(path.join(moduleDir, 'jobs.js'));
-    if (jobsPath) {
-      const registerJobs = require(jobsPath);
-      if (typeof registerJobs === 'function') {
-        await registerJobs(moduleContext);
-      }
-    }
-
-    loadedModules.push({
-      ...manifest,
-      slug: moduleSlug,
-      migrationsApplied: migrations,
-      panels: panelDefs
-    });
   }
 
   return { modules: loadedModules, scheduler };

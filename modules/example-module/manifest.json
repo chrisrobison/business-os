@@ -1,5 +1,16 @@
 {
   "name": "example-module",
   "version": "0.1.0",
-  "description": "Reference module that demonstrates plugin hooks"
+  "description": "Reference module that demonstrates plugin hooks",
+  "permissions": {
+    "entities": [],
+    "routes": true,
+    "jobs": false,
+    "events": {
+      "publish": [],
+      "subscribe": [
+        "customer.created"
+      ]
+    }
+  }
 }

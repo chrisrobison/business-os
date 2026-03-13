@@ -1,6 +1,8 @@
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const config = require('./config');
 const EventBus = require('./eventBus');
 const createEntityRouter = require('./router');
@@ -11,6 +13,8 @@ const { createTenantManager } = require('./tenancy/tenantManager');
 const { runWithRequestContext, getRequestContext } = require('./requestContext');
 const { createAuthMiddleware } = require('./auth/middleware');
 const { buildAuthConfig, validateAuthConfig } = require('./auth/config');
+const { createMetricsRegistry, createRequestTelemetry } = require('./observability');
+const { assertAllowedKeys, validateIdentifier } = require('./validation');
 
 const serverHookRegistry = {
   'server.auditView': async ({ req, appId, navItemId, context, options }) => ({
@@ -37,8 +41,38 @@ const serverHookRegistry = {
 
 async function buildServer() {
   const app = express();
-  app.use(cors());
-  app.use(express.json({ limit: '2mb' }));
+  const sendEnvelope = (res, data) => res.json({ version: 'v1', data });
+  const trustProxySetting = config.security.trustProxy;
+  app.set('trust proxy', trustProxySetting === 'false' ? false : trustProxySetting);
+
+  app.use(helmet({
+    contentSecurityPolicy: false
+  }));
+  app.use(cors({
+    origin(origin, callback) {
+      const allowlist = config.security.corsAllowlist;
+      if (!origin || allowlist.length === 0 || allowlist.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error('Origin not allowed by CORS policy'));
+    }
+  }));
+  app.use('/api/auth/login', express.json({ limit: config.security.authBodyLimit }));
+  app.use('/api', express.json({ limit: config.security.apiBodyLimit }));
+
+  const metrics = createMetricsRegistry();
+  app.use(createRequestTelemetry({
+    getContext: getRequestContext,
+    metrics
+  }));
+
+  app.use('/api', rateLimit({
+    windowMs: config.security.rateLimitWindowMs,
+    max: config.security.rateLimitMax,
+    standardHeaders: true,
+    legacyHeaders: false
+  }));
   const authConfig = buildAuthConfig(process.env);
   validateAuthConfig(authConfig);
 
@@ -92,6 +126,7 @@ async function buildServer() {
   app.use(async (req, res, next) => {
     const requestPath = req.path || '';
     const isControlPlane = requestPath === '/health'
+      || requestPath === '/ready'
       || requestPath.startsWith('/admin');
 
     if (isControlPlane) {
@@ -99,14 +134,45 @@ async function buildServer() {
     }
 
     try {
-      const host = tenantManager.extractRequestHost(req);
+      const host = tenantManager.extractRequestHost(req, {
+        trustForwardedHost: config.tenancy.trustForwardedHost
+      });
+      if (!host) {
+        console.warn(JSON.stringify({
+          level: 'warn',
+          at: new Date().toISOString(),
+          type: 'tenancy_resolution_missing_host',
+          requestId: req.requestId || null,
+          path: req.path
+        }));
+      }
       const tenant = await tenantManager.resolveTenantForHost(host);
 
       if (!tenant && config.tenancy.strictHostMatch) {
+        console.warn(JSON.stringify({
+          level: 'warn',
+          at: new Date().toISOString(),
+          type: 'tenancy_resolution_miss',
+          requestId: req.requestId || null,
+          host,
+          path: req.path
+        }));
         if (requestPath.startsWith('/api/')) {
           return res.status(404).json({ error: `No tenant mapping for host '${host}'` });
         }
         return res.status(404).send(`No tenant mapping for host '${host}'`);
+      }
+
+      if (!tenant && !config.tenancy.strictHostMatch && requestPath.startsWith('/api/')) {
+        console.warn(JSON.stringify({
+          level: 'warn',
+          at: new Date().toISOString(),
+          type: 'tenancy_resolution_fallback_default',
+          requestId: req.requestId || null,
+          host,
+          path: req.path,
+          defaultTenantId: defaultTenant.instance.id
+        }));
       }
 
       const context = tenant || defaultTenant;
@@ -123,6 +189,26 @@ async function buildServer() {
       defaultTenantId: defaultTenant.instance.id,
       time: new Date().toISOString()
     });
+  });
+
+  app.get('/ready', async (req, res) => {
+    try {
+      await controlStore.listInstances();
+      await defaultTenant.db.query('SELECT 1 AS ok');
+      res.json({
+        ok: true,
+        controlDb: true,
+        tenantDb: true,
+        defaultTenantId: defaultTenant.instance.id,
+        time: new Date().toISOString()
+      });
+    } catch (error) {
+      res.status(503).json({
+        ok: false,
+        error: error.message || 'readiness check failed',
+        time: new Date().toISOString()
+      });
+    }
   });
 
   app.get('/', (req, res) => {
@@ -149,12 +235,19 @@ async function buildServer() {
   });
 
   app.get('/api/system/modules', (req, res) => {
-    res.json({ modules, jobs: scheduler.listJobs() });
+    sendEnvelope(res, { modules, jobs: scheduler.listJobs() });
+  });
+
+  app.get('/api/system/metrics', (req, res) => {
+    sendEnvelope(res, {
+      generatedAt: new Date().toISOString(),
+      routes: metrics.snapshot()
+    });
   });
 
   app.get('/api/system', (req, res) => {
     const context = getActiveContext();
-    res.json({
+    sendEnvelope(res, {
       app: 'business-os',
       version: '0.1.0',
       dbClient: db.client,
@@ -205,6 +298,7 @@ async function buildServer() {
       }
 
       const payload = req.body || {};
+      assertAllowedKeys(payload, new Set(['navItemId', 'context', 'options']), 'apps hook payload');
       const result = await hookFn({
         req,
         appId: req.params.appId,
@@ -233,7 +327,7 @@ async function buildServer() {
         controlStore.listInstances(),
         controlStore.listDomains()
       ]);
-      res.json({
+      sendEnvelope(res, {
         customers,
         instances,
         domains
@@ -245,7 +339,7 @@ async function buildServer() {
 
   app.get('/api/admin/tenancy/customers', async (req, res, next) => {
     try {
-      res.json(await controlStore.listCustomers());
+      sendEnvelope(res, await controlStore.listCustomers());
     } catch (error) {
       next(error);
     }
@@ -253,8 +347,10 @@ async function buildServer() {
 
   app.post('/api/admin/tenancy/customers', async (req, res, next) => {
     try {
-      const customer = await controlStore.createCustomer(req.body || {});
-      res.status(201).json(customer);
+      const payload = req.body || {};
+      assertAllowedKeys(payload, new Set(['id', 'name', 'status', 'metadata']), 'customer payload');
+      const customer = await controlStore.createCustomer(payload);
+      res.status(201).json({ version: 'v1', data: customer });
     } catch (error) {
       next(error);
     }
@@ -262,11 +358,14 @@ async function buildServer() {
 
   app.put('/api/admin/tenancy/customers/:customerId', async (req, res, next) => {
     try {
-      const customer = await controlStore.updateCustomer(req.params.customerId, req.body || {});
+      const customerId = validateIdentifier(req.params.customerId, 'customerId');
+      const payload = req.body || {};
+      assertAllowedKeys(payload, new Set(['name', 'status', 'metadata']), 'customer payload');
+      const customer = await controlStore.updateCustomer(customerId, payload);
       if (!customer) {
         return res.status(404).json({ error: 'Customer not found' });
       }
-      return res.json(customer);
+      return sendEnvelope(res, customer);
     } catch (error) {
       return next(error);
     }
@@ -274,7 +373,7 @@ async function buildServer() {
 
   app.get('/api/admin/tenancy/instances', async (req, res, next) => {
     try {
-      res.json(await controlStore.listInstances());
+      sendEnvelope(res, await controlStore.listInstances());
     } catch (error) {
       next(error);
     }
@@ -282,10 +381,12 @@ async function buildServer() {
 
   app.post('/api/admin/tenancy/instances', async (req, res, next) => {
     try {
-      const instance = await controlStore.createInstance(req.body || {});
+      const payload = req.body || {};
+      assertAllowedKeys(payload, new Set(['id', 'customer_id', 'name', 'status', 'is_default', 'db_client', 'db_config', 'app_config']), 'instance payload');
+      const instance = await controlStore.createInstance(payload);
       tenantManager.invalidateAll();
       await refreshDefaultTenant();
-      res.status(201).json(instance);
+      res.status(201).json({ version: 'v1', data: instance });
     } catch (error) {
       next(error);
     }
@@ -293,13 +394,16 @@ async function buildServer() {
 
   app.put('/api/admin/tenancy/instances/:instanceId', async (req, res, next) => {
     try {
-      const instance = await controlStore.updateInstance(req.params.instanceId, req.body || {});
+      const instanceId = validateIdentifier(req.params.instanceId, 'instanceId');
+      const payload = req.body || {};
+      assertAllowedKeys(payload, new Set(['customer_id', 'name', 'status', 'is_default', 'db_client', 'db_config', 'app_config']), 'instance payload');
+      const instance = await controlStore.updateInstance(instanceId, payload);
       if (!instance) {
         return res.status(404).json({ error: 'Instance not found' });
       }
       tenantManager.invalidateInstance(instance.id);
       await refreshDefaultTenant();
-      return res.json(instance);
+      return sendEnvelope(res, instance);
     } catch (error) {
       return next(error);
     }
@@ -307,7 +411,7 @@ async function buildServer() {
 
   app.get('/api/admin/tenancy/domains', async (req, res, next) => {
     try {
-      res.json(await controlStore.listDomains());
+      sendEnvelope(res, await controlStore.listDomains());
     } catch (error) {
       next(error);
     }
@@ -315,10 +419,12 @@ async function buildServer() {
 
   app.post('/api/admin/tenancy/domains', async (req, res, next) => {
     try {
-      const domain = await controlStore.createDomain(req.body || {});
+      const payload = req.body || {};
+      assertAllowedKeys(payload, new Set(['id', 'instance_id', 'host', 'domain', 'status']), 'domain payload');
+      const domain = await controlStore.createDomain(payload);
       tenantManager.invalidateAll();
       await refreshDefaultTenant();
-      res.status(201).json(domain);
+      res.status(201).json({ version: 'v1', data: domain });
     } catch (error) {
       next(error);
     }
@@ -326,13 +432,16 @@ async function buildServer() {
 
   app.put('/api/admin/tenancy/domains/:domainId', async (req, res, next) => {
     try {
-      const domain = await controlStore.updateDomain(req.params.domainId, req.body || {});
+      const domainId = validateIdentifier(req.params.domainId, 'domainId');
+      const payload = req.body || {};
+      assertAllowedKeys(payload, new Set(['instance_id', 'host', 'domain', 'status']), 'domain payload');
+      const domain = await controlStore.updateDomain(domainId, payload);
       if (!domain) {
         return res.status(404).json({ error: 'Domain mapping not found' });
       }
       tenantManager.invalidateAll();
       await refreshDefaultTenant();
-      return res.json(domain);
+      return sendEnvelope(res, domain);
     } catch (error) {
       return next(error);
     }
@@ -344,8 +453,22 @@ async function buildServer() {
   app.use('/modules', express.static(path.join(process.cwd(), 'modules')));
 
   app.use((err, req, res, next) => {
-    console.error(err);
-    res.status(500).json({ error: err.message || 'Internal server error' });
+    const statusCode = Number(err && err.statusCode) || 500;
+    console.error(JSON.stringify({
+      level: 'error',
+      at: new Date().toISOString(),
+      type: 'http_error',
+      requestId: req.requestId || null,
+      method: req.method,
+      path: req.path,
+      statusCode,
+      message: err && err.message ? err.message : 'Internal server error'
+    }));
+    res.status(statusCode).json({
+      error: err.message || 'Internal server error',
+      details: err.details || null,
+      requestId: req.requestId || null
+    });
   });
 
   const server = app.listen(config.port, () => {
@@ -357,17 +480,20 @@ async function buildServer() {
     console.log(`Loaded modules: ${modules.map((m) => m.name).join(', ') || '(none)'}`);
   });
 
-  const shutdown = async () => {
+  const shutdown = async ({ exitProcess = true } = {}) => {
     scheduler.stopAll();
     await tenantManager.closeAll();
     await controlStore.close();
-    server.close(() => process.exit(0));
+    await new Promise((resolve) => server.close(resolve));
+    if (exitProcess) {
+      process.exit(0);
+    }
   };
 
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', () => shutdown({ exitProcess: true }));
+  process.on('SIGTERM', () => shutdown({ exitProcess: true }));
 
-  return { app, server, db, eventBus, modules, controlStore };
+  return { app, server, db, eventBus, modules, controlStore, shutdown, scheduler };
 }
 
 if (require.main === module) {
